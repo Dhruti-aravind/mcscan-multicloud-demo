@@ -1,0 +1,105 @@
+"""Streamlit Community Cloud entry point for the existing Motion + FastAPI demo.
+
+The React dashboard uses a Streamlit Components v2 bridge. Each browser session
+gets its own in-process TestClient, while the existing FastAPI app enforces
+authentication, CSRF, administrator privileges, and scan ownership.
+"""
+from __future__ import annotations
+
+import os
+
+import streamlit as st
+from fastapi.testclient import TestClient
+
+from mcscan.web.app import NewUser, create_app
+
+st.set_page_config(
+    page_title="mcscan — Cloud security, in focus.",
+    page_icon="☁️",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+
+@st.cache_resource
+def application():
+    """Share only the data store; each Streamlit session owns its HTTP client."""
+    app = create_app(db_path=os.getenv("MCSCAN_DB", ".data/streamlit.db"))
+    email = os.getenv("MCSCAN_ADMIN_EMAIL", "").strip().lower()
+    password = os.getenv("MCSCAN_ADMIN_PASSWORD", "")
+    if email and password:
+        body = NewUser(email=email, name=os.getenv("MCSCAN_ADMIN_NAME", "Administrator"),
+                       password=password)
+        with app.state.store.connect() as con:
+            has_admin = con.execute("SELECT 1 FROM app_users WHERE role='admin'").fetchone()
+        if not has_admin:
+            app.state.store.add_user(body.email, body.name, body.password, "admin")
+    return app
+
+
+app = application()
+with app.state.store.connect() as connection:
+    configured = connection.execute("SELECT 1 FROM app_users WHERE role='admin'").fetchone()
+if not configured:
+    st.error("The administrator is not configured yet.")
+    st.info("Set MCSCAN_ADMIN_EMAIL and MCSCAN_ADMIN_PASSWORD (12+ characters) "
+            "in Streamlit Cloud’s app secrets, then reboot the app.")
+    st.stop()
+
+if "mcscan_client" not in st.session_state:
+    st.session_state.mcscan_client = TestClient(app)
+if "mcscan_reply" not in st.session_state:
+    st.session_state.mcscan_reply = None
+
+st.markdown("""
+<style>
+  [data-testid="stHeader"], [data-testid="stToolbar"], footer {display:none!important}
+  [data-testid="stAppViewContainer"] {background:#0b0e0c}
+  [data-testid="stMainBlockContainer"] {max-width:none!important;padding:0!important}
+  [data-testid="stVerticalBlock"] {gap:0!important}
+  [data-testid="stElementContainer"] {width:100%!important}
+</style>
+""", unsafe_allow_html=True)
+
+dashboard = st.components.v2.component(
+    "mcscan.dashboard",
+    html='<div class="react-root"></div>',
+    css="streamlit.css",
+    js="streamlit.js",
+)
+result = dashboard(
+    key="mcscan_dashboard",
+    data={"reply": st.session_state.mcscan_reply},
+    on_request_change=lambda: None,
+)
+
+if result.request:
+    message = result.request
+    path = message.get("path", "")
+    method = message.get("method", "GET").upper()
+    if not path.startswith("/") or path.startswith("//") or method not in ("GET", "POST", "PATCH"):
+        st.session_state.mcscan_reply = {
+            "id": message.get("id"), "status": 400, "error": "Invalid dashboard request",
+        }
+    else:
+        response = st.session_state.mcscan_client.request(
+            method, "/api" + path,
+            content=message.get("body"),
+            headers={"x-csrf-token": message.get("csrf", ""),
+                     "content-type": "application/json"},
+        )
+        reply = {"id": message["id"], "status": response.status_code}
+        if "/export/" in path and response.is_success:
+            reply.update({"content": response.text,
+                          "mime": response.headers.get("content-type", "text/plain")})
+        else:
+            try:
+                body = response.json()
+            except ValueError:
+                body = {"detail": response.text or "Request failed"}
+            reply["body"] = body
+            if not response.is_success:
+                detail = body.get("detail", "Request failed") if isinstance(body, dict) else body
+                reply["error"] = str(detail)
+        st.session_state.mcscan_reply = reply
+    st.rerun()
