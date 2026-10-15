@@ -50,6 +50,8 @@ if "mcscan_client" not in st.session_state:
     st.session_state.mcscan_client = TestClient(app)
 if "mcscan_reply" not in st.session_state:
     st.session_state.mcscan_reply = None
+if "mcscan_last_request_id" not in st.session_state:
+    st.session_state.mcscan_last_request_id = None
 
 st.markdown("""
 <style>
@@ -73,8 +75,9 @@ result = dashboard(
     on_request_change=lambda: None,
 )
 
-if result.request:
+if result.request and result.request.get("id") != st.session_state.mcscan_last_request_id:
     message = result.request
+    st.session_state.mcscan_last_request_id = message.get("id")
     path = message.get("path", "")
     method = message.get("method", "GET").upper()
     if not path.startswith("/") or path.startswith("//") or method not in ("GET", "POST", "PATCH"):
