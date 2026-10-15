@@ -23,12 +23,19 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
+ROOT = Path(__file__).resolve().parent
+
+# Components v2 only exists in recent Streamlit releases.
+if not hasattr(st.components, "v2") or not hasattr(st.components.v2, "component"):
+    st.error(f"Streamlit {st.__version__} does not support Components v2.")
+    st.info("Add `streamlit>=1.51.0` to requirements.txt and reboot the app.")
+    st.stop()
+
 
 @st.cache_resource
 def scanner_package():
     """Load a checksum-verified wheel split for GitHub's browser upload limit."""
-    root = Path(__file__).resolve().parent
-    parts = [root / f"mcscan-wheel-{index:02d}.bin" for index in range(1, 6)]
+    parts = [ROOT / f"mcscan-wheel-{index:02d}.bin" for index in range(1, 6)]
     if not any(part.exists() for part in parts):
         return None  # A normal local installation uses requirements.txt instead.
     if not all(part.exists() for part in parts):
@@ -39,7 +46,7 @@ def scanner_package():
     if hashlib.sha256(wheel).hexdigest() != expected:
         st.error("The scanner package checksum does not match.")
         st.stop()
-    target = root / ".data" / f"mcscan-runtime-{expected[:12]}"
+    target = ROOT / ".data" / f"mcscan-runtime-{expected[:12]}"
     if not (target / ".ready").exists():
         target.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(io.BytesIO(wheel)) as archive:
@@ -51,7 +58,7 @@ def scanner_package():
 
 
 scanner_package()
-from mcscan.web.app import NewUser, create_app
+from mcscan.web.app import NewUser, create_app  # noqa: E402
 
 
 @st.cache_resource
@@ -68,6 +75,19 @@ def application():
         if not has_admin:
             app.state.store.add_user(body.email, body.name, body.password, "admin")
     return app
+
+
+@st.cache_resource
+def load_assets():
+    """Read the dashboard CSS/JS as text; v2 expects inline code, not file paths."""
+    css_path = ROOT / "streamlit.css"
+    js_path = ROOT / "streamlit.js"
+    missing = [p.name for p in (css_path, js_path) if not p.exists()]
+    if missing:
+        return None, None, missing
+    return (css_path.read_text(encoding="utf-8"),
+            js_path.read_text(encoding="utf-8"),
+            [])
 
 
 app = application()
@@ -96,11 +116,17 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+dashboard_css, dashboard_js, missing_assets = load_assets()
+if missing_assets:
+    st.error("Dashboard assets are missing from the repository: " + ", ".join(missing_assets))
+    st.info("Commit streamlit.css and streamlit.js next to streamlit_app.py.")
+    st.stop()
+
 dashboard = st.components.v2.component(
-    "mcscan.dashboard",
+    "mcscan_dashboard",  # underscores only; dots are read as package.component
     html='<div class="react-root"></div>',
-    css="streamlit.css",
-    js="streamlit.js",
+    css=dashboard_css,
+    js=dashboard_js,
 )
 result = dashboard(
     key="mcscan_dashboard",
@@ -108,8 +134,9 @@ result = dashboard(
     on_request_change=lambda: None,
 )
 
-if result.request and result.request.get("id") != st.session_state.mcscan_last_request_id:
-    message = result.request
+request = getattr(result, "request", None)
+if request and request.get("id") != st.session_state.mcscan_last_request_id:
+    message = request
     st.session_state.mcscan_last_request_id = message.get("id")
     path = message.get("path", "")
     method = message.get("method", "GET").upper()
