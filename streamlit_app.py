@@ -6,12 +6,15 @@ authentication, CSRF, administrator privileges, and scan ownership.
 """
 from __future__ import annotations
 
+import hashlib
+import io
 import os
+import sys
+import zipfile
+from pathlib import Path
 
 import streamlit as st
 from fastapi.testclient import TestClient
-
-from mcscan.web.app import NewUser, create_app
 
 st.set_page_config(
     page_title="mcscan — Cloud security, in focus.",
@@ -19,6 +22,36 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+
+
+@st.cache_resource
+def scanner_package():
+    """Load a checksum-verified wheel split for GitHub's browser upload limit."""
+    root = Path(__file__).resolve().parent
+    parts = [root / f"mcscan-wheel-{index:02d}.bin" for index in range(1, 6)]
+    if not any(part.exists() for part in parts):
+        return None  # A normal local installation uses requirements.txt instead.
+    if not all(part.exists() for part in parts):
+        st.error("The scanner package upload is incomplete.")
+        st.stop()
+    wheel = b"".join(part.read_bytes() for part in parts)
+    expected = "f31584367d5febbec35e0eb7e56993ecd03a798c1280c91d8148dc31259a628f"
+    if hashlib.sha256(wheel).hexdigest() != expected:
+        st.error("The scanner package checksum does not match.")
+        st.stop()
+    target = root / ".data" / f"mcscan-runtime-{expected[:12]}"
+    if not (target / ".ready").exists():
+        target.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(io.BytesIO(wheel)) as archive:
+            archive.extractall(target)
+        (target / ".ready").write_text(expected, encoding="ascii")
+    if str(target) not in sys.path:
+        sys.path.insert(0, str(target))
+    return target
+
+
+scanner_package()
+from mcscan.web.app import NewUser, create_app
 
 
 @st.cache_resource
@@ -50,6 +83,8 @@ if "mcscan_client" not in st.session_state:
     st.session_state.mcscan_client = TestClient(app)
 if "mcscan_reply" not in st.session_state:
     st.session_state.mcscan_reply = None
+if "mcscan_last_request_id" not in st.session_state:
+    st.session_state.mcscan_last_request_id = None
 
 st.markdown("""
 <style>
@@ -73,8 +108,9 @@ result = dashboard(
     on_request_change=lambda: None,
 )
 
-if result.request:
+if result.request and result.request.get("id") != st.session_state.mcscan_last_request_id:
     message = result.request
+    st.session_state.mcscan_last_request_id = message.get("id")
     path = message.get("path", "")
     method = message.get("method", "GET").upper()
     if not path.startswith("/") or path.startswith("//") or method not in ("GET", "POST", "PATCH"):
